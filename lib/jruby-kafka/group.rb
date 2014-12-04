@@ -31,6 +31,7 @@ class Kafka::Group
   #   to consume from, start with the earliest message present in the log rather than the latest message.
   # :consumer_restart_on_error => "true" - (optional) Controls if consumer threads are to restart on caught exceptions.
   #   exceptions are logged.
+  # :schema - REQUIRED
   def initialize(options={})
     validate_required_arguments(options)
 
@@ -57,6 +58,13 @@ class Kafka::Group
     @consumer_restart_on_error = "#{false}"
     @consumer_restart_sleep_ms = '0'
     @consumer_id = nil
+
+    @schema_file = options[:schema]
+    @schema = File.open(@schema_file).read
+    java_import 'org.apache.avro.Schema$Parser'
+    parser = Parser.new
+    @reader = Java::OrgApacheAvroGeneric::GenericDatumReader.new(parser.parse(@schema))
+    @factory = Java::OrgApacheAvroIo::DecoderFactory.get
 
     if options[:zk_connect_timeout]
       @zk_connect_timeout = "#{options[:zk_connect_timeout]}"
@@ -162,7 +170,23 @@ class Kafka::Group
     topic_count_map = java.util.HashMap.new
     thread_value = a_num_threads.to_java Java::int
     topic_count_map.put(@topic, thread_value)
-    consumer_map = @consumer.createMessageStreams(topic_count_map)
+    key_decoder = Java::kafka::serializer::StringDecoder.new(nil)
+    java_import 'kafka.serializer.Decoder'
+    value_decoder = Decoder.new
+    class << value_decoder
+      def init(factory, reader)
+        @factory = factory
+        @reader = reader
+      end
+      def fromBytes(bytes)
+        decoder = @factory.binaryDecoder(bytes, nil)
+        return @reader.read(nil, decoder)
+      end
+    end
+    value_decoder.init(@factory, @reader)
+    consumer_map = @consumer.createMessageStreams(topic_count_map,
+                                                  key_decoder,
+                                                  value_decoder)
     streams = Array.new(consumer_map[@topic])
 
     @executor = Executors.newFixedThreadPool(a_num_threads)
